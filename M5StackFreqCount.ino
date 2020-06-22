@@ -13,7 +13,7 @@
 
 // Define Function Prototypes that use User Types below here or use a .h file
 //
-
+void DispFreqCount();
 
 // Define Functions below here or use other .ino or cpp files
 //
@@ -31,7 +31,7 @@ volatile int32_t PrePulsCounter;    //前回読み込みしたパルスカウント
 volatile uint32_t CurTime;          //usec
 volatile uint32_t PreTime;          //前回読み込みしたusec
 
-volatile uint16_t GateTime;         //ゲートタイム
+volatile uint16_t RemainTime;         //ゲートタイム
 volatile bool GateStartFlg;         //スタートフラグ
 volatile uint32_t OverCount;
 
@@ -40,9 +40,12 @@ hw_timer_t* timer1 = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 int int_cycle = 1000;	//usec
+uint16_t GateTime = 10;
+
 //----------------------------
 //タイマー割込み関数
 // 現在のパルスカウント数を取得
+// +32768でオバーフローするので積算する
 //----------------------------
 void IRAM_ATTR onTimer1()
 {
@@ -65,12 +68,13 @@ void IRAM_ATTR onTimer1()
 		if (count < precount)
 			OverCount++;
 		PulsCounter = count + 0x7fff * OverCount;
-		GateTime--;
+		RemainTime--;
 	}
 	precount = count;
 	portEXIT_CRITICAL_ISR(&timerMux);
-}
 
+}
+//----------------------------
 void SetOutputFreq(double freq)
 {
 	int basef;
@@ -109,10 +113,17 @@ void setup()
 	delay(500);
 	// text print
 	M5.Lcd.fillScreen(BLACK);
-	M5.Lcd.setCursor(10, 10);
+	M5.Lcd.setCursor(40, 10);
+	M5.Lcd.setTextColor(0xfff0, 0);
+	M5.Lcd.setTextFont(4);
+	M5.Lcd.setTextSize(1);
+	M5.Lcd.printf("Frequecy Counter");
+
 	M5.Lcd.setTextColor(WHITE);
-	M5.Lcd.setTextSize(2);
-	M5.Lcd.printf("Frequecy Counter!");
+	M5.Lcd.setTextFont(4);
+	M5.Lcd.setTextSize(1);
+
+	dacWrite(25, 0); // Speaker OFF
 
 	//パルスカウンタ設定
 	pcnt_config_t pcnt_config;//設定用の構造体の宣言
@@ -132,7 +143,8 @@ void setup()
 	pcnt_counter_clear(PCNT_UNIT_0);//カウンタ初期化
 	pcnt_counter_resume(PCNT_UNIT_0);//カウント開始
 
-	GateTime = 2;
+	GateTime = 200;
+	RemainTime = GateTime;
 	GateStartFlg = true;
 
 	//タイマー0、プリスケーラー,
@@ -146,7 +158,7 @@ void setup()
 	Serial.println("Start!");
 
 	//テスト信号出力
-	SetOutputFreq(1e6);
+	SetOutputFreq(500e3);
 }
 
 //----------------------------
@@ -154,55 +166,77 @@ void setup()
 //----------------------------
 void loop()
 {
-	if (GateTime == 0)
+	if (RemainTime == 0)
+	{
+		DispFreqCount();
+	}
+	// update button state
+	M5.update();
+
+	// if you want to use Releasefor("was released for"), use .wasReleasefor(int time) below
+	if (M5.BtnA.wasReleased())
 	{
 		portENTER_CRITICAL_ISR(&timerMux);
-		GateTime = 500;
-		GateStartFlg = true;
-
-		uint32_t countdiff = PulsCounter - PrePulsCounter;
-		uint32_t timediff;
-		if (CurTime < PreTime)
-			timediff = 0xffffffff - (PreTime - CurTime);
-		else
-			timediff = (CurTime - PreTime);
-
-		float f = (float)countdiff / (float)timediff * 1000.0;
+		GateTime += 50;
 		portEXIT_CRITICAL_ISR(&timerMux);
-
-		M5.Lcd.fillRect(0, 0, 360, 26, 0);
-
-		Serial.printf("frequency :%0.3fkHz %d %d %d %u %u %u\n", f, PulsCounter, PrePulsCounter, countdiff, CurTime, PreTime, timediff);
-
-		//  M5.Lcd.clear();
-		M5.Lcd.fillRect(0, 50, 360, 75, 0);
-		delay(1);
-
-		M5.Lcd.setCursor(0, 50);
-		M5.Lcd.printf("frequency :%8.3fkHz\n", f);
-
-		M5.Lcd.setCursor(0, 70);
-		M5.Lcd.printf("countdiff :%d\n", countdiff);
-
-		M5.Lcd.setCursor(0, 90);
-		M5.Lcd.printf("Gate Time :%dusec\n", int_cycle);
-
-		M5.Lcd.fillRect(0, 220, 240, 20, 0);
-		M5.Lcd.progressBar(0, 220, 240, 20, 20);
-
-
 	}
-	/*
-		  if(countdiff < 1000)
-		  {
-			int_cycle += 1000 ;
-			timerEnd(timer1);
-			timer1 = timerBegin(0, 80, true);
-			//割込み関数
-			timerAttachInterrupt(timer1, &onTimer1, true);
-			timerAlarmWrite(timer1, int_cycle, true);
-			timerAlarmEnable(timer1);
-			delay(int_cycle/1000);
-		  }
-		*/
+	else if (M5.BtnB.wasReleased())
+	{
+		portENTER_CRITICAL_ISR(&timerMux);
+		GateTime -= 50;
+		portEXIT_CRITICAL_ISR(&timerMux);
+	}
+	else if (M5.BtnC.wasReleased())
+	{
+		portENTER_CRITICAL_ISR(&timerMux);
+		GateTime = 200;
+		portEXIT_CRITICAL_ISR(&timerMux);
+	}
+
 }
+
+//----------------------------
+void DispFreqCount()
+{
+	//割込み停止
+	timerAlarmDisable(timer1);
+
+	portENTER_CRITICAL_ISR(&timerMux);
+	uint32_t countdiff = PulsCounter - PrePulsCounter;
+	uint32_t timediff;
+	if (CurTime < PreTime)
+		timediff = 0xffffffff - (PreTime - CurTime);
+	else
+		timediff = (CurTime - PreTime);
+
+	float f = (float)countdiff / (float)timediff * 1000.0;
+	RemainTime = GateTime;
+	GateStartFlg = true;
+	portEXIT_CRITICAL_ISR(&timerMux);
+
+
+	Serial.printf("frequency :%0.3fkHz %d %d %d %u %u %u\n", f, PulsCounter, PrePulsCounter, countdiff, CurTime, PreTime, timediff);
+
+	M5.Lcd.fillRect(130, 60, 190, 30, 0);
+
+	M5.Lcd.setTextFont(4);
+	M5.Lcd.setTextSize(1);
+	M5.Lcd.setCursor(0, 60);
+	M5.Lcd.printf("Frequency :%8.3fkHz\n", f);
+
+	M5.Lcd.setTextFont(2);
+	M5.Lcd.setTextSize(1);
+
+	M5.Lcd.fillRect(0, 220, 320, 20, 0);
+	M5.Lcd.setCursor(0, 220);
+	M5.Lcd.printf("Gate Time :%dmsec\n", GateTime);
+
+	//M5.Lcd.fillRect(0, 220, 240, 20, 0);
+	//M5.Lcd.progressBar(0, 220, 240, 20, 20);
+
+	//割込み開始
+	timerAlarmEnable(timer1);
+
+}
+
+
